@@ -1,11 +1,6 @@
 import mongoose from "mongoose";
 import Company from "../companies/company.schema.js";
 import { calculateAccountingService } from "../tally/accounting/accounting.controller.js";
-import { calculateExpenseService } from "../tally/Expense/expense.js";
-import { calculateCashBalanceService } from "../tally/cash/cash.service.js";
-import { calculateBankBalanceService } from "../tally/bank/bank.service.js";
-import { calculateReceivablesService } from "../tally/receivables/receivables.services.js";
-import { calculatePayablesService } from "../tally/payables/payables.services.js";
 import { ApiError } from "../../utils/api-error.js";
 import { ok } from "../../utils/response.js";
 
@@ -63,12 +58,12 @@ export const resolveCompany = async (companyId) => {
 
 /**
  * Core Service: Calculates summary amounts for Dashboard Home:
- * - revenue: Sales total amount
- * - expense: Purchase + Indirect Expense total amount
- * - cash_balance: Cash-in-Hand closing balance (Opening + DR - CR)
- * - bank_balance: Bank Accounts closing balance (Opening + DR - CR)
- * - receivable: Sundry Debtors total receivable
- * - payable: Sundry Creditors total payable
+ * - revenue: Sales total amount (via calculateAccountingService requirement: "sales")
+ * - expense: Purchase + Indirect Expense total amount (via calculateAccountingService)
+ * - cash_balance: Cash closing balance (via calculateAccountingService requirement: "cash")
+ * - bank_balance: Bank closing balance (via calculateAccountingService requirement: "bank")
+ * - receivable: Sundry Debtors total receivable (via calculateAccountingService requirement: "receivable")
+ * - payable: Sundry Creditors total payable (via calculateAccountingService requirement: "payable")
  */
 export const calculateDashboardHomeData = async ({
   companyId,
@@ -79,9 +74,10 @@ export const calculateDashboardHomeData = async ({
   const company = await resolveCompany(companyId);
   const targetCompanyId = company._id;
 
-  // 2. Fetch modules in parallel
+  // 2. Fetch all accounting modules in parallel using the unified accounting engine
   const [
     salesResult,
+    purchaseResult,
     expenseResult,
     cashResult,
     bankResult,
@@ -94,35 +90,47 @@ export const calculateDashboardHomeData = async ({
       from_date,
       to_date,
     }),
-    calculateExpenseService({
+    calculateAccountingService({
       companyId: targetCompanyId,
+      requirement: "purchase",
       from_date,
       to_date,
     }),
-    calculateCashBalanceService({
+    calculateAccountingService({
       companyId: targetCompanyId,
+      requirement: "expense",
       from_date,
       to_date,
     }),
-    calculateBankBalanceService({
+    calculateAccountingService({
       companyId: targetCompanyId,
+      requirement: "cash",
       from_date,
       to_date,
     }),
-    calculateReceivablesService({
+    calculateAccountingService({
       companyId: targetCompanyId,
+      requirement: "bank",
       from_date,
       to_date,
     }),
-    calculatePayablesService({
+    calculateAccountingService({
       companyId: targetCompanyId,
+      requirement: "receivable",
+      from_date,
+      to_date,
+    }),
+    calculateAccountingService({
+      companyId: targetCompanyId,
+      requirement: "payable",
       from_date,
       to_date,
     }),
   ]);
 
-  // 3. Unwrap settled module results
+  // 3. Unwrap settled module results safely
   const sales = unwrapSettled(salesResult, "Sales");
+  const purchase = unwrapSettled(purchaseResult, "Purchase");
   const expense = unwrapSettled(expenseResult, "Expense");
   const cash = unwrapSettled(cashResult, "Cash");
   const bank = unwrapSettled(bankResult, "Bank");
@@ -130,20 +138,23 @@ export const calculateDashboardHomeData = async ({
   const payable = unwrapSettled(payableResult, "Payable");
 
   // 4. Extract pure amount values
-  const revenueAmount = round2(sales?.amount ?? 0);
-  const expenseAmount = round2(expense?.amount ?? expense?.total_amount ?? 0);
+  const revenueAmount = round2(sales?.amount ?? sales?.total_amount ?? 0);
+
+  const purchaseAmount = Number(purchase?.amount ?? purchase?.total_amount ?? 0);
+  const indirectExpenseAmount = Number(expense?.amount ?? expense?.total_amount ?? 0);
+  const expenseAmount = round2(purchaseAmount + indirectExpenseAmount);
 
   const cashBalanceAmount = round2(
-    cash?.closing_balance ?? cash?.amount ?? 0
+    cash?.closing_balance ?? cash?.amount ?? cash?.balance ?? 0
   );
   const bankBalanceAmount = round2(
-    bank?.closing_balance ?? bank?.amount ?? 0
+    bank?.closing_balance ?? bank?.amount ?? bank?.balance ?? 0
   );
   const receivableAmount = round2(
-    receivable?.closing_balance ?? 0
+    receivable?.amount ?? receivable?.total ?? receivable?.closing_balance ?? 0
   );
   const payableAmount = round2(
-    payable?.closing_balance ??  0
+    payable?.amount ?? payable?.total ?? payable?.closing_balance ?? 0
   );
 
   return {
