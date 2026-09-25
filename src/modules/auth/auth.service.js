@@ -1,5 +1,11 @@
 import { env } from "../../config/env.js";
 import User from "../users/user.schema.js";
+import "../users/user.tenantMembership.schema.js";
+import "../users/user.companyMembership.schema.js";
+import "../tenant/tenant.schema.js";
+import "../tenant/tenantRoles.schema.js";
+import "../companies/company.schema.js";
+import "../companies/comanyRoles.schema.js";
 import AuthOtp from "./authOtp.schema.js";
 import RefreshToken from "./refreshToken.schema.js";
 import { ApiError } from "../../utils/api-error.js";
