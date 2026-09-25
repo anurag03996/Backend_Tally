@@ -8,6 +8,8 @@ import {
 } from "./accounting.calculator.js";
 import { calculateCashBalanceService } from "../cash/cash.service.js";
 import { calculateBankBalanceService } from "../bank/bank.service.js";
+import { calculateReceivablesService } from "../receivables/receivables.services.js";
+import { calculatePayablesService } from "../payables/payables.services.js";
 import { ApiError } from "../../../utils/api-error.js";
 import { ok } from "../../../utils/response.js";
 
@@ -125,6 +127,44 @@ export const calculateAccountingService = async ({
       type: "balance",
       searched_groups: groupNames,
       ...bankData,
+    };
+  }
+
+  if (rawRequirement === "receivable") {
+    const receivableData = await calculateReceivablesService({
+      companyId: targetCompanyId,
+      from_date,
+      to_date,
+    });
+
+    return {
+      requirement: "receivable",
+      type: "outstanding",
+      searched_groups: groupNames,
+      total: receivableData.total_receivable ?? receivableData.amount ?? 0,
+      amount: receivableData.total_receivable ?? receivableData.amount ?? 0,
+      total_parties: receivableData.total_customers || receivableData.customers?.length || 0,
+      parties: receivableData.customers || [],
+      ...receivableData,
+    };
+  }
+
+  if (rawRequirement === "payable") {
+    const payableData = await calculatePayablesService({
+      companyId: targetCompanyId,
+      from_date,
+      to_date,
+    });
+
+    return {
+      requirement: "payable",
+      type: "outstanding",
+      searched_groups: groupNames,
+      total: payableData.total_payable ?? payableData.amount ?? 0,
+      amount: payableData.total_payable ?? payableData.amount ?? 0,
+      total_parties: payableData.total_vendors || payableData.vendors?.length || 0,
+      parties: payableData.vendors || [],
+      ...payableData,
     };
   }
 
