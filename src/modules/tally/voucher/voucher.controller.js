@@ -1441,8 +1441,20 @@ const getVoucherslist = async (req, res) => {
     };
 
     const targetCompanyId = company_id || companyId || req.body?.company_id || req.body?.companyId;
+    const rawCompanyIds = req.query?.company_ids || req.body?.company_ids;
+
     if (targetCompanyId && mongoose.Types.ObjectId.isValid(targetCompanyId)) {
       filter.company_id = new mongoose.Types.ObjectId(targetCompanyId);
+    } else if (rawCompanyIds) {
+      const ids = Array.isArray(rawCompanyIds)
+        ? rawCompanyIds
+        : String(rawCompanyIds).split(",").map((s) => s.trim()).filter(Boolean);
+      const validIds = ids
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+      if (validIds.length > 0) {
+        filter.company_id = { $in: validIds };
+      }
     }
 
     let hasVoucherIds = false;
@@ -1604,9 +1616,20 @@ const getVoucherslist = async (req, res) => {
         },
       },
       {
+        $lookup: {
+          from: "companies",
+          localField: "company_id",
+          foreignField: "_id",
+          as: "company_doc",
+        },
+      },
+      {
         $addFields: {
           party_ledger_name: {
             $ifNull: [{ $arrayElemAt: ["$party_ledger.name", 0] }, null],
+          },
+          company_name: {
+            $ifNull: [{ $arrayElemAt: ["$company_doc.name", 0] }, null],
           },
           amount: computeVoucherAmountExpression,
         },
@@ -1614,6 +1637,7 @@ const getVoucherslist = async (req, res) => {
       {
         $project: {
           party_ledger: 0,
+          company_doc: 0,
         },
       },
     ];
@@ -1706,12 +1730,28 @@ const getVoucherslist = async (req, res) => {
            Number(specificEntry.amount) < 0)
         : null;
 
+      if (!partyName && Array.isArray(v.ledgerentries)) {
+        const candidate = v.ledgerentries.find(
+          (e) =>
+            e.ledger_name &&
+            !/cgst|sgst|igst|tax|vat|sales account|purchase account/i.test(
+              e.ledger_name
+            )
+        );
+        if (candidate) {
+          partyName = candidate.ledger_name;
+          partyLedgerId = candidate.ledger_id;
+        }
+      }
+
       const { ledgerentries, ...rest } = v;
 
       return {
         ...rest,
         party_ledger_id: partyLedgerId,
         party_ledger_name: partyName,
+        party_name: partyName || v.party_name || "General Ledger",
+        company_name: v.company_name,
         amount: gross,
         gross_amount: gross,
         net_amount: net,
@@ -1854,9 +1894,12 @@ const getVoucherslist = async (req, res) => {
       total: totalTax,
     };
 
+    const totalCount = await Voucher.countDocuments(filter);
+
     return res.status(200).json({
       success: true,
       count: vouchersWithBifurcation.length,
+      total_count: totalCount,
       total_gross_amount: totalGross,
       total_net_amount: totalNet,
       total_debit: totalDebit,

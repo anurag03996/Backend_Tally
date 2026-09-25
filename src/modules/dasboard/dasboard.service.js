@@ -165,6 +165,7 @@ export const calculateDashboardHomeData = async ({
       to_date: to_date || null,
     },
     revenue: revenueAmount,
+    purchase: round2(purchaseAmount),
     expense: expenseAmount,
     cash_balance: cashBalanceAmount,
     bank_balance: bankBalanceAmount,
