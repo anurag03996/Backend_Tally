@@ -10,11 +10,11 @@ export const getEntrySide = (entry) => {
   if (entry.entry_type === "DEBIT") return "debit";
   if (entry.entry_type === "CREDIT") return "credit";
 
-  // In Tally:
-  // - is_deemed_positive = false with positive amount is DEBIT
-  // - is_deemed_positive = true (or negative adjustment entries) is CREDIT
-  if (entry.is_deemed_positive === false) {
-    return amount >= 0 ? "debit" : "credit";
+  // In Tally XML:
+  // - Debit entries: amount < 0 or is_deemed_positive === true
+  // - Credit entries: amount >= 0 or is_deemed_positive === false
+  if (amount < 0 || entry.is_deemed_positive === true) {
+    return "debit";
   } else {
     return "credit";
   }
@@ -165,8 +165,9 @@ export const calculateOutstanding = ({
 
     // Determine debit / credit
     const isDebit =
-      (rawAmount > 0 && !entry.is_deemed_positive) ||
-      (rawAmount < 0 && entry.is_deemed_positive);
+      entry.entry_type === "DEBIT" ||
+      (entry.entry_type !== "CREDIT" &&
+        (rawAmount < 0 || entry.is_deemed_positive === true));
 
     const debit = isDebit ? amount : 0;
     const credit = !isDebit ? amount : 0;
