@@ -84,7 +84,7 @@ export const getTenantCompanies = async (tenantId, selectedCompanyIds = []) => {
   }
 
   return Company.find(query)
-    .select("_id name company_id tally_company_name gst_number")
+    .select("_id name company_id tally_company_name gst_number state")
     .lean();
 };
 
@@ -189,6 +189,7 @@ export const calculateTenantDashboardData = async ({
         company_id: company._id,
         company_name: company.name,
         gst_number: company.gst_number || null,
+        state: company.state || null,
         status: "failed",
         error: result.reason?.message || "Failed to calculate company metrics",
         revenue: 0,
@@ -204,6 +205,7 @@ export const calculateTenantDashboardData = async ({
     return {
       ...result.value,
       gst_number: company.gst_number || null,
+      state: company.state || null,
       status: "success",
     };
   });
