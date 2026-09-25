@@ -216,30 +216,49 @@ export const calculateTenantDashboardData = async ({
   // 6. Compute real tenant-level voucher counts, tax breakdown, and monthly trend
   const companyObjectIds = companies.map((c) => c._id);
 
+  const voucherDateFilter = {};
+  if (from_date || to_date) {
+    voucherDateFilter.date = {};
+    if (from_date) voucherDateFilter.date.$gte = new Date(from_date);
+    if (to_date) voucherDateFilter.date.$lte = new Date(to_date);
+  }
+
   try {
     const [totalVouchers, salesVoucherCount, purchaseVoucherCount] = await Promise.all([
       Voucher.countDocuments({
         company_id: { $in: companyObjectIds },
         is_deleted: { $ne: true },
         is_cancelled: { $ne: true },
+        ...voucherDateFilter,
       }),
       Voucher.countDocuments({
         company_id: { $in: companyObjectIds },
         is_deleted: { $ne: true },
         is_cancelled: { $ne: true },
         vchtype: { $regex: /sale/i },
+        ...voucherDateFilter,
       }),
       Voucher.countDocuments({
         company_id: { $in: companyObjectIds },
         is_deleted: { $ne: true },
         is_cancelled: { $ne: true },
         vchtype: { $regex: /purchase/i },
+        ...voucherDateFilter,
       }),
     ]);
 
     summary.total_vouchers = totalVouchers;
     summary.sales_vouchers_count = salesVoucherCount;
     summary.purchase_vouchers_count = purchaseVoucherCount;
+
+    const vouchers = await Voucher.find({
+      company_id: { $in: companyObjectIds },
+      is_deleted: { $ne: true },
+      is_cancelled: { $ne: true },
+      ...voucherDateFilter,
+    }).select("_id date").lean();
+
+    const voucherDateMap = new Map(vouchers.map((v) => [String(v._id), v.date]));
 
     // Real Tax aggregation: Output GST vs Input GST (ITC)
     const taxLedgers = await Ledger.find({
@@ -250,11 +269,13 @@ export const calculateTenantDashboardData = async ({
     let outputGst = 0;
     let inputGst = 0;
 
-    if (taxLedgers.length > 0) {
+    if (taxLedgers.length > 0 && vouchers.length > 0) {
+      const voucherIds = vouchers.map((v) => v._id);
       const taxLedgerMap = new Map(taxLedgers.map((l) => [String(l._id), l.name.toLowerCase()]));
       const taxEntries = await LedgerEntry.find({
         company_id: { $in: companyObjectIds },
         ledger_id: { $in: taxLedgers.map((l) => l._id) },
+        voucher_id: { $in: voucherIds },
       }).select("ledger_id amount").lean();
 
       for (const e of taxEntries) {
@@ -291,23 +312,15 @@ export const calculateTenantDashboardData = async ({
 
     // Monthly Trend Rollup (H1: Apr to Sep)
     const monthNames = ["Apr", "May", "Jun", "Jul", "Aug", "Sep"];
-    const fyYear = 2026;
+    const startYear = from_date ? new Date(from_date).getFullYear() : 2026;
     const monthlyTrend = monthNames.map((m) => ({
-      month: `${m} ${String(fyYear).slice(-2)}`,
+      month: `${m} ${String(startYear).slice(-2)}`,
       sales: 0,
       purchases: 0,
       sales_raw: 0,
       purchases_raw: 0,
       count: 0,
     }));
-
-    const vouchers = await Voucher.find({
-      company_id: { $in: companyObjectIds },
-      is_deleted: { $ne: true },
-      is_cancelled: { $ne: true },
-    }).select("_id date").lean();
-
-    const voucherDateMap = new Map(vouchers.map((v) => [String(v._id), v.date]));
 
     // Accurately resolve sales and purchases per company using identical accounting criteria
     for (const c of companies) {
