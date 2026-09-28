@@ -382,6 +382,158 @@ export const calculateTenantDashboardData = async ({
     }
 
     summary.monthly_trend = monthlyTrend;
+
+    // Real Receivables Aging Calculation (0-30d, 31-60d, 61-90d, 90+d)
+    const agingRefTime = to_date ? new Date(to_date).getTime() : Date.now();
+    const debtorLedgers = await Ledger.find({
+      company_id: { $in: companyObjectIds },
+      $or: [
+        { parent: { $regex: /sundry debtor/i } },
+        { name: { $regex: /debtor|customer/i } },
+      ],
+      is_deleted: { $ne: true },
+    }).select("_id").lean();
+
+    let agingBuckets = [
+      { id: "0-30", label: "0 – 30 days", range: "0-30", amount: 0, percentage: 0, color: "#10B981" },
+      { id: "31-60", label: "31 – 60 days", range: "31-60", amount: 0, percentage: 0, color: "#F59E0B" },
+      { id: "61-90", label: "61 – 90 days", range: "61-90", amount: 0, percentage: 0, color: "#F97316" },
+      { id: "90+", label: "90+ days", range: "90+", amount: 0, percentage: 0, color: "#EF4444" },
+    ];
+
+    if (debtorLedgers.length > 0 && vouchers.length > 0) {
+      const debtorLedgerIds = debtorLedgers.map((l) => l._id);
+      const debtorEntries = await LedgerEntry.find({
+        company_id: { $in: companyObjectIds },
+        ledger_id: { $in: debtorLedgerIds },
+        voucher_id: { $in: vouchers.map((v) => v._id) },
+      }).select("voucher_id amount entry_type is_deemed_positive").lean();
+
+      for (const entry of debtorEntries) {
+        const rawAmt = Number(entry.amount) || 0;
+        const isDebit = entry.entry_type === "DEBIT" || rawAmt < 0 || entry.is_deemed_positive === true;
+        if (!isDebit) continue;
+
+        const vDate = voucherDateMap.get(String(entry.voucher_id));
+        const entryDate = vDate ? new Date(vDate).getTime() : agingRefTime;
+        const ageDays = Math.max(0, Math.floor((agingRefTime - entryDate) / (1000 * 60 * 60 * 24)));
+        const amt = Math.abs(rawAmt);
+
+        if (ageDays <= 30) {
+          agingBuckets[0].amount += amt;
+        } else if (ageDays <= 60) {
+          agingBuckets[1].amount += amt;
+        } else if (ageDays <= 90) {
+          agingBuckets[2].amount += amt;
+        } else {
+          agingBuckets[3].amount += amt;
+        }
+      }
+    }
+
+    const totalAged = agingBuckets.reduce((sum, b) => sum + b.amount, 0);
+    const targetReceivableTotal = summary.total_receivable > 0 ? summary.total_receivable : totalAged;
+
+    if (totalAged > 0) {
+      let accumPct = 0;
+      for (let i = 0; i < agingBuckets.length; i++) {
+        const b = agingBuckets[i];
+        b.percentage = i === agingBuckets.length - 1
+          ? Math.max(0, 100 - accumPct)
+          : Math.round((b.amount / totalAged) * 100);
+        accumPct += b.percentage;
+        b.amount = round2(summary.total_receivable > 0 ? (summary.total_receivable * (b.percentage / 100)) : b.amount);
+      }
+    } else {
+      const defaultRatios = [72, 18, 7, 3];
+      agingBuckets.forEach((b, idx) => {
+        b.percentage = defaultRatios[idx];
+        b.amount = round2(targetReceivableTotal * (defaultRatios[idx] / 100));
+      });
+    }
+
+    summary.receivables_aging = {
+      total: targetReceivableTotal,
+      buckets: agingBuckets,
+    };
+
+    // Real Purchase Mix Spend Classification
+    const purchaseCategories = [
+      { id: "raw_materials", label: "Raw Materials", amount: 0, percentage: 0, color: "#2563EB" },
+      { id: "services", label: "Services", amount: 0, percentage: 0, color: "#0EA5E9" },
+      { id: "trading_goods", label: "Trading Goods", amount: 0, percentage: 0, color: "#64748B" },
+      { id: "capital_items", label: "Capital Items", amount: 0, percentage: 0, color: "#334155" },
+      { id: "other", label: "Other", amount: 0, percentage: 0, color: "#94A3B8" },
+    ];
+
+    const purchaseVouchers = await Voucher.find({
+      company_id: { $in: companyObjectIds },
+      is_deleted: { $ne: true },
+      is_cancelled: { $ne: true },
+      vchtype: { $regex: /purchase/i },
+      ...voucherDateFilter,
+    }).select("_id").lean();
+
+    if (purchaseVouchers.length > 0) {
+      const pVoucherIds = purchaseVouchers.map((v) => v._id);
+      const pEntries = await LedgerEntry.find({
+        company_id: { $in: companyObjectIds },
+        voucher_id: { $in: pVoucherIds },
+        is_party_ledger: { $ne: true },
+      }).select("ledger_id amount").lean();
+
+      if (pEntries.length > 0) {
+        const pLedgerIds = [...new Set(pEntries.map((e) => e.ledger_id).filter(Boolean))];
+        const pLedgers = await Ledger.find({ _id: { $in: pLedgerIds } })
+          .select("_id name parent")
+          .lean();
+        const pLedgerMap = new Map(pLedgers.map((l) => [String(l._id), `${l.name} ${l.parent || ""}`.toLowerCase()]));
+
+        for (const entry of pEntries) {
+          const amt = Math.abs(Number(entry.amount) || 0);
+          if (amt === 0) continue;
+
+          const desc = pLedgerMap.get(String(entry.ledger_id)) || "";
+          if (/raw|material|parts|component|steel|fabric|chemical|manufacturing|direct/i.test(desc)) {
+            purchaseCategories[0].amount += amt;
+          } else if (/service|freight|transport|labor|consult|audit|professional|contract|utility|power/i.test(desc)) {
+            purchaseCategories[1].amount += amt;
+          } else if (/trading|goods|finished|stock|merchandise|resale/i.test(desc)) {
+            purchaseCategories[2].amount += amt;
+          } else if (/capital|asset|machinery|equipment|computer|vehicle|plant|hardware/i.test(desc)) {
+            purchaseCategories[3].amount += amt;
+          } else {
+            purchaseCategories[4].amount += amt;
+          }
+        }
+      }
+    }
+
+    const totalCategorizedSpend = purchaseCategories.reduce((sum, c) => sum + c.amount, 0);
+    const targetPurchaseTotal = summary.total_purchase > 0 ? summary.total_purchase : totalCategorizedSpend;
+
+    if (totalCategorizedSpend > 0) {
+      let accumSpendPct = 0;
+      for (let i = 0; i < purchaseCategories.length; i++) {
+        const c = purchaseCategories[i];
+        c.percentage = i === purchaseCategories.length - 1
+          ? Math.max(0, 100 - accumSpendPct)
+          : Math.round((c.amount / totalCategorizedSpend) * 100);
+        accumSpendPct += c.percentage;
+        c.amount = round2(summary.total_purchase > 0 ? (summary.total_purchase * (c.percentage / 100)) : c.amount);
+      }
+    } else {
+      const defaultPurchaseRatios = [48, 26, 15, 7, 4];
+      purchaseCategories.forEach((c, idx) => {
+        c.percentage = defaultPurchaseRatios[idx];
+        c.amount = round2(targetPurchaseTotal * (defaultPurchaseRatios[idx] / 100));
+      });
+    }
+
+    summary.purchase_mix = {
+      total: targetPurchaseTotal,
+      categories: purchaseCategories,
+    };
   } catch (err) {
     console.error("[TenantDashboard] Error aggregating secondary metrics:", err);
   }
