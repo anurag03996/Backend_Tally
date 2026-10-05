@@ -148,13 +148,20 @@ export const calculateTenantDashboardData = async ({
   // 1. Resolve Tenant to guarantee tenant boundary
   const tenant = await resolveTenant(tenantId);
 
-  // 2. Fetch companies belonging to this tenant
+  // 2. Fetch companies belonging to this tenant (filtered if companyIds specified, plus complete roster)
+  const allTenantCompanies = await getTenantCompanies(tenant._id, []);
   const companies = await getTenantCompanies(tenant._id, companyIds);
 
   if (!companies || companies.length === 0) {
     return {
       tenant_id: tenant._id,
       tenant_name: tenant.name,
+      all_companies: allTenantCompanies.map((c) => ({
+        company_id: c._id,
+        company_name: c.name,
+        gst_number: c.gst_number || null,
+        state: c.state || null,
+      })),
       period: {
         from_date: from_date || null,
         to_date: to_date || null,
@@ -310,17 +317,37 @@ export const calculateTenantDashboardData = async ({
       },
     };
 
-    // Monthly Trend Rollup (H1: Apr to Sep)
-    const monthNames = ["Apr", "May", "Jun", "Jul", "Aug", "Sep"];
-    const startYear = from_date ? new Date(from_date).getFullYear() : 2026;
-    const monthlyTrend = monthNames.map((m) => ({
-      month: `${m} ${String(startYear).slice(-2)}`,
-      sales: 0,
-      purchases: 0,
-      sales_raw: 0,
-      purchases_raw: 0,
-      count: 0,
-    }));
+    // Dynamic Monthly Trend Rollup based on requested date range
+    const monthNamesShort = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const startDate = from_date ? new Date(from_date) : new Date(2026, 3, 1);
+    const endDate = to_date ? new Date(to_date) : new Date(2026, 8, 30);
+
+    const monthlyTrend = [];
+    const monthKeyMap = new Map();
+
+    const cur = new Date(startDate.getFullYear(), startDate.getMonth(), 1);
+    const last = new Date(endDate.getFullYear(), endDate.getMonth(), 1);
+
+    while (cur <= last) {
+      const y = cur.getFullYear();
+      const m = cur.getMonth();
+      const key = `${y}-${String(m + 1).padStart(2, "0")}`;
+      const monthLabel = `${monthNamesShort[m]} ${String(y).slice(-2)}`;
+
+      monthlyTrend.push({
+        key,
+        month: monthLabel,
+        shortMonth: monthNamesShort[m],
+        sales: 0,
+        purchases: 0,
+        sales_raw: 0,
+        purchases_raw: 0,
+        count: 0,
+      });
+      monthKeyMap.set(key, monthlyTrend.length - 1);
+
+      cur.setMonth(cur.getMonth() + 1);
+    }
 
     // Accurately resolve sales and purchases per company using identical accounting criteria
     for (const c of companies) {
@@ -344,9 +371,9 @@ export const calculateTenantDashboardData = async ({
           const vDate = voucherDateMap.get(String(e.voucher_id));
           if (!vDate) continue;
           const d = new Date(vDate);
-          const mIdx = d.getMonth();
-          const targetIdx = mIdx >= 3 && mIdx <= 8 ? mIdx - 3 : -1;
-          if (targetIdx >= 0 && targetIdx < monthlyTrend.length) {
+          const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+          const targetIdx = monthKeyMap.get(key);
+          if (targetIdx !== undefined && targetIdx >= 0 && targetIdx < monthlyTrend.length) {
             monthlyTrend[targetIdx].sales_raw += Math.abs(Number(e.amount) || 0);
             monthlyTrend[targetIdx].count += 1;
           }
@@ -358,9 +385,9 @@ export const calculateTenantDashboardData = async ({
           const vDate = voucherDateMap.get(String(e.voucher_id));
           if (!vDate) continue;
           const d = new Date(vDate);
-          const mIdx = d.getMonth();
-          const targetIdx = mIdx >= 3 && mIdx <= 8 ? mIdx - 3 : -1;
-          if (targetIdx >= 0 && targetIdx < monthlyTrend.length) {
+          const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+          const targetIdx = monthKeyMap.get(key);
+          if (targetIdx !== undefined && targetIdx >= 0 && targetIdx < monthlyTrend.length) {
             monthlyTrend[targetIdx].purchases_raw += Math.abs(Number(e.amount) || 0);
             monthlyTrend[targetIdx].count += 1;
           }
@@ -377,8 +404,10 @@ export const calculateTenantDashboardData = async ({
     for (const item of monthlyTrend) {
       item.sales = round2(item.sales_raw / 100000);
       item.purchases = round2(item.purchases_raw / 100000);
+      item.net_raw = Math.max(0, item.sales_raw - item.purchases_raw);
       item.salesLabel = formatFullINR(item.sales_raw);
       item.purchasesLabel = formatFullINR(item.purchases_raw);
+      item.netLabel = formatFullINR(item.net_raw);
     }
 
     summary.monthly_trend = monthlyTrend;
@@ -444,11 +473,19 @@ export const calculateTenantDashboardData = async ({
         accumPct += b.percentage;
         b.amount = round2(summary.total_receivable > 0 ? (summary.total_receivable * (b.percentage / 100)) : b.amount);
       }
+    } else if (targetReceivableTotal > 0) {
+      // If balance exists but specific aging entries not found, allocate to current 0-30 days
+      agingBuckets[0].percentage = 100;
+      agingBuckets[0].amount = round2(targetReceivableTotal);
+      for (let i = 1; i < agingBuckets.length; i++) {
+        agingBuckets[i].percentage = 0;
+        agingBuckets[i].amount = 0;
+      }
     } else {
-      const defaultRatios = [72, 18, 7, 3];
-      agingBuckets.forEach((b, idx) => {
-        b.percentage = defaultRatios[idx];
-        b.amount = round2(targetReceivableTotal * (defaultRatios[idx] / 100));
+      // Strict zero state without dummy ratios
+      agingBuckets.forEach((b) => {
+        b.percentage = 0;
+        b.amount = 0;
       });
     }
 
@@ -522,11 +559,19 @@ export const calculateTenantDashboardData = async ({
         accumSpendPct += c.percentage;
         c.amount = round2(summary.total_purchase > 0 ? (summary.total_purchase * (c.percentage / 100)) : c.amount);
       }
+    } else if (targetPurchaseTotal > 0) {
+      // If purchase balance exists but individual items uncategorized, assign to Other
+      purchaseCategories[4].percentage = 100;
+      purchaseCategories[4].amount = round2(targetPurchaseTotal);
+      for (let i = 0; i < 4; i++) {
+        purchaseCategories[i].percentage = 0;
+        purchaseCategories[i].amount = 0;
+      }
     } else {
-      const defaultPurchaseRatios = [48, 26, 15, 7, 4];
-      purchaseCategories.forEach((c, idx) => {
-        c.percentage = defaultPurchaseRatios[idx];
-        c.amount = round2(targetPurchaseTotal * (defaultPurchaseRatios[idx] / 100));
+      // Strict zero state without dummy ratios
+      purchaseCategories.forEach((c) => {
+        c.percentage = 0;
+        c.amount = 0;
       });
     }
 
@@ -541,6 +586,12 @@ export const calculateTenantDashboardData = async ({
   return {
     tenant_id: tenant._id,
     tenant_name: tenant.name,
+    all_companies: allTenantCompanies.map((c) => ({
+      company_id: c._id,
+      company_name: c.name,
+      gst_number: c.gst_number || null,
+      state: c.state || null,
+    })),
     period: {
       from_date: from_date || null,
       to_date: to_date || null,
